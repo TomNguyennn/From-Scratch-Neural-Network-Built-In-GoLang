@@ -11,12 +11,16 @@ import (
 	"time"
 )
 
+// encodedRow holds one processed sample after converting the species label
+// into a one-hot encoded target vector.
 type encodedRow struct {
 	values []string
 	label  string
 }
 
 func main() {
+	// Accept CLI flags so the split script can be reused with different ratios,
+	// output files, and random seeds.
 	inputPath := flag.String("input", "Iris.csv", "input CSV file")
 	trainPath := flag.String("train", "train.csv", "output training CSV file")
 	validationPath := flag.String("validation", "validation.csv", "output validation CSV file")
@@ -36,6 +40,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Split by class so each output file keeps a similar class distribution.
 	trainRows, validationRows, testRows, err := stratifiedSplit(rows, *trainRatio, *validationRatio, *testRatio, *seed)
 	if err != nil {
 		log.Fatal(err)
@@ -57,6 +62,7 @@ func main() {
 }
 
 func validateRatios(trainRatio, validationRatio, testRatio float64) error {
+	// All three ratios must be positive and together form a complete dataset split.
 	if trainRatio <= 0 || validationRatio <= 0 || testRatio <= 0 {
 		return fmt.Errorf("all split ratios must be greater than 0")
 	}
@@ -70,6 +76,8 @@ func validateRatios(trainRatio, validationRatio, testRatio float64) error {
 }
 
 func readAndEncodeRows(path string) ([]string, []encodedRow, error) {
+	// Read the raw Iris CSV and convert the species column into three output
+	// columns so the neural network can learn a multiclass target.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open input csv: %w", err)
@@ -119,6 +127,8 @@ func readAndEncodeRows(path string) ([]string, []encodedRow, error) {
 }
 
 func encodeSpecies(species string) ([]string, string, error) {
+	// One-hot encoding turns the flower class into the 3 output neurons that
+	// the classifier will predict.
 	switch species {
 	case "Iris-setosa":
 		return []string{"1", "0", "0"}, species, nil
@@ -132,6 +142,8 @@ func encodeSpecies(species string) ([]string, string, error) {
 }
 
 func stratifiedSplit(rows []encodedRow, trainRatio, validationRatio, testRatio float64, seed int64) ([][]string, [][]string, [][]string, error) {
+	// Group rows by label before shuffling so each split gets examples from
+	// every flower class.
 	grouped := make(map[string][]encodedRow)
 	for _, row := range rows {
 		grouped[row.label] = append(grouped[row.label], row)
@@ -147,6 +159,8 @@ func stratifiedSplit(rows []encodedRow, trainRatio, validationRatio, testRatio f
 			return nil, nil, nil, fmt.Errorf("label %q needs at least 3 rows for train/validation/test splits", label)
 		}
 
+		// Shuffle inside each class bucket before slicing into train, validation,
+		// and test sets.
 		rng.Shuffle(len(group), func(i, j int) {
 			group[i], group[j] = group[j], group[i]
 		})
@@ -193,6 +207,7 @@ func stratifiedSplit(rows []encodedRow, trainRatio, validationRatio, testRatio f
 }
 
 func writeCSV(path string, header []string, rows [][]string) (err error) {
+	// Write the transformed dataset back to disk with the header preserved.
 	file, err := os.Create(path)
 	if err != nil {
 		return err
