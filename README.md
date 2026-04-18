@@ -1,3 +1,4 @@
+<<<<<<< ours
 # 🧠 From-Scratch Neural Network in GoLang
 
 [](https://golang.org/)
@@ -88,3 +89,173 @@ go run neural_network.go
   * Adding customizable activation functions (Tanh, Leaky ReLU).
   * Supporting dynamic layer creation via struct methods.
   * Exporting trained weights to a `.json` or `.gob` file for persistent inference.
+=======
+# From-Scratch Iris Classifier in Go
+
+This project builds a small neural-network classifier for the Iris dataset in pure Go. It now covers the full workflow:
+
+- split and encode the raw dataset
+- train a saved model artifact
+- predict one sample or many samples from CSV
+- use goroutines for preprocessing and batch inference
+
+## Project Layout
+
+- `train_test_split.go`
+  - reads `Iris.csv`
+  - one-hot encodes the species label
+  - uses a worker-pool pipeline to parse rows concurrently
+  - writes `train.csv`, `validation.csv`, and `test.csv`
+- `neural_network.go`
+  - loads the split datasets
+  - fits feature normalization from the training set
+  - trains the neural network
+  - evaluates train, validation, and test metrics
+  - saves the trained model to `model.json`
+- `predict.go`
+  - runs single-sample inference from CLI flags
+  - runs batch prediction from a CSV file
+  - uses goroutines for concurrent batch inference
+- `internal/irisnn`
+  - reusable model, scaler, dataset, and model I/O logic
+
+## Requirements
+
+- Go installed locally
+- the Iris dataset present as `Iris.csv`
+
+If your environment needs the explicit local toolchain, use:
+
+```bash
+GOTOOLCHAIN=local GO111MODULE=on GOCACHE="$(pwd)/.gocache" /usr/local/go/bin/go <command>
+```
+
+Otherwise, plain `go run` and `go test` commands are enough.
+
+## 1. Split the Dataset
+
+Generate stratified train, validation, and test splits:
+
+```bash
+go run train_test_split.go --workers 4
+```
+
+Useful flags:
+
+- `--input`
+- `--train`
+- `--validation`
+- `--test`
+- `--train-ratio`
+- `--validation-ratio`
+- `--test-ratio`
+- `--seed`
+- `--workers`
+
+The preprocessing pipeline uses this concurrency pattern:
+
+- one feeder goroutine sends CSV rows into a `jobs` channel
+- multiple worker goroutines validate and encode rows
+- one collector receives `results` and owns the output slice
+
+That design keeps the splitting logic and file writes single-threaded while avoiding write races.
+
+## 2. Train the Model
+
+Train the neural network and save the model artifact:
+
+```bash
+go run neural_network.go --model-out model.json --epochs 100 --learning-rate 0.15 --hidden-neurons 10 --seed 42
+```
+
+Outputs:
+
+- training loss printed across epochs
+- train, validation, and test loss/accuracy
+- saved model artifact in `model.json`
+
+The saved artifact includes:
+
+- weights and biases
+- network configuration
+- scaler mean/std
+- label names
+- evaluation metrics
+
+## 3. Predict a Single Flower
+
+Run inference for one flower measurement:
+
+```bash
+go run predict.go --sepal-length 5.1 --sepal-width 3.5 --petal-length 1.4 --petal-width 0.2
+```
+
+Output:
+
+- predicted species
+- class probabilities for all three labels
+
+## 4. Run Batch Prediction
+
+Predict a full CSV with concurrent workers:
+
+```bash
+go run predict.go --batch-input test.csv --batch-output predictions.csv --workers 4 --benchmark-repeats 3
+```
+
+Batch mode:
+
+- reads rows from the input CSV
+- normalizes features with the saved scaler
+- predicts labels concurrently
+- preserves original row order in the output file
+- prints timing for each benchmark repeat
+
+The output CSV appends:
+
+- `PredictedSpecies`
+- `ProbSetosa`
+- `ProbVersicolor`
+- `ProbVirginica`
+
+## Testing
+
+Run the test suite:
+
+```bash
+go test ./...
+```
+
+Run the race detector on the concurrent prediction path:
+
+```bash
+go run -race predict.go --batch-input test.csv --batch-output predictions.csv --workers 4 --benchmark-repeats 1
+```
+
+Run the race detector on concurrent dataset preprocessing:
+
+```bash
+go run -race train_test_split.go --workers 4
+```
+
+Current automated tests cover:
+
+- feature extraction from both plain and labeled CSV rows
+- batch prediction output ordering under worker concurrency
+- model save/load round-trip behavior
+
+## Resume-Relevant Project Points
+
+This codebase now supports stronger project claims because it includes:
+
+- a saved-model inference workflow instead of retraining for every prediction
+- concurrency in preprocessing and batch inference
+- measurable train, validation, and test metrics
+- reusable package organization under `internal/irisnn`
+
+## Next Improvements
+
+- add benchmark reporting that compares `--workers 1` vs `--workers N`
+- add tests for malformed CSV headers and prediction error paths
+- add support for unlabeled 4-column batch input with a cleaner output schema
+>>>>>>> theirs

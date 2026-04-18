@@ -8,76 +8,34 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 )
 
 // encodedRow holds one processed sample after converting the species label
 // into a one-hot encoded target vector.
+type rowJob struct {
+	index   int
+	lineNum int
+	record  []string
+}
+type rowResult struct {
+	index   int
+	lineNum int
+	row     encodedRow
+	err     error
+}
+
 type encodedRow struct {
 	values []string
 	label  string
 }
 
-func main() {
-	// Accept CLI flags so the split script can be reused with different ratios,
-	// output files, and random seeds.
-	inputPath := flag.String("input", "Iris.csv", "input CSV file")
-	trainPath := flag.String("train", "train.csv", "output training CSV file")
-	validationPath := flag.String("validation", "validation.csv", "output validation CSV file")
-	testPath := flag.String("test", "test.csv", "output test CSV file")
-	trainRatio := flag.Float64("train-ratio", 0.7, "fraction of rows per class for training")
-	validationRatio := flag.Float64("validation-ratio", 0.15, "fraction of rows per class for validation")
-	testRatio := flag.Float64("test-ratio", 0.15, "fraction of rows per class for testing")
-	seed := flag.Int64("seed", time.Now().UnixNano(), "random seed for shuffling")
-	flag.Parse()
-
-	if err := validateRatios(*trainRatio, *validationRatio, *testRatio); err != nil {
-		log.Fatal(err)
-	}
-
-	header, rows, err := readAndEncodeRows(*inputPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Split by class so each output file keeps a similar class distribution.
-	trainRows, validationRows, testRows, err := stratifiedSplit(rows, *trainRatio, *validationRatio, *testRatio, *seed)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := writeCSV(*trainPath, header, trainRows); err != nil {
-		log.Fatalf("write train csv: %v", err)
-	}
-	if err := writeCSV(*validationPath, header, validationRows); err != nil {
-		log.Fatalf("write validation csv: %v", err)
-	}
-	if err := writeCSV(*testPath, header, testRows); err != nil {
-		log.Fatalf("write test csv: %v", err)
-	}
-
-	fmt.Printf("Created %s with %d rows\n", *trainPath, len(trainRows))
-	fmt.Printf("Created %s with %d rows\n", *validationPath, len(validationRows))
-	fmt.Printf("Created %s with %d rows\n", *testPath, len(testRows))
-}
-
-func validateRatios(trainRatio, validationRatio, testRatio float64) error {
-	// All three ratios must be positive and together form a complete dataset split.
-	if trainRatio <= 0 || validationRatio <= 0 || testRatio <= 0 {
-		return fmt.Errorf("all split ratios must be greater than 0")
-	}
-
-	total := trainRatio + validationRatio + testRatio
-	if math.Abs(total-1.0) > 1e-9 {
-		return fmt.Errorf("split ratios must add up to 1.0; got %.6f", total)
-	}
-
-	return nil
-}
-
-func readAndEncodeRows(path string) ([]string, []encodedRow, error) {
+func readAndEncodeRows(path string, workers int) ([]string, []encodedRow, error) {
 	// Read the raw Iris CSV and convert the species column into three output
-	// columns so the neural network can learn a multiclass target.
+	// Feeder goroutine -> worker goroutines -> collector in this function.
+	// Only the collector owns the output slice, which avoids write races.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open input csv: %w", err)
@@ -104,23 +62,54 @@ func readAndEncodeRows(path string) ([]string, []encodedRow, error) {
 		"Virginica",
 	}
 
-	rows := make([]encodedRow, 0, len(records)-1)
-	for i, record := range records[1:] {
-		if len(record) != 6 {
-			return nil, nil, fmt.Errorf("row %d has %d columns, expected 6", i+2, len(record))
+	jobs := make(chan rowJob)
+	results := make(chan rowResult)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go parseWorker(jobs, results, &wg)
+	}
+
+	go func() {
+		for i, record := range records[1:] {
+			jobs <- rowJob{
+				index:   i,
+				lineNum: i + 2,
+				record:  record,
+			}
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	orderedRows := make([]encodedRow, len(records)-1)
+
+	var catchError error
+
+	for result := range results {
+		if result.err != nil {
+			if catchError == nil {
+				catchError = fmt.Errorf("row %d: %w", result.lineNum, result.err)
+			}
+			continue
 		}
 
-		encoded, label, err := encodeSpecies(record[5])
-		if err != nil {
-			return nil, nil, fmt.Errorf("row %d: %w", i+2, err)
-		}
+		orderedRows[result.index] = result.row
+	}
 
-		values := append([]string{}, record[:5]...)
-		values = append(values, encoded...)
-		rows = append(rows, encodedRow{
-			values: values,
-			label:  label,
-		})
+	if catchError != nil {
+		return nil, nil, catchError
+	}
+
+	rows := make([]encodedRow, 0, len(orderedRows))
+	for _, row := range orderedRows {
+		rows = append(rows, row)
 	}
 
 	return header, rows, nil
@@ -206,6 +195,20 @@ func stratifiedSplit(rows []encodedRow, trainRatio, validationRatio, testRatio f
 	return trainRows, validationRows, testRows, nil
 }
 
+func validateRatios(trainRatio, validationRatio, testRatio float64) error {
+	// All three ratios must be positive and together form a complete dataset split.
+	if trainRatio <= 0 || validationRatio <= 0 || testRatio <= 0 {
+		return fmt.Errorf("all split ratios must be greater than 0")
+	}
+
+	total := trainRatio + validationRatio + testRatio
+	if math.Abs(total-1.0) > 1e-9 {
+		return fmt.Errorf("split ratios must add up to 1.0; got %.6f", total)
+	}
+
+	return nil
+}
+
 func writeCSV(path string, header []string, rows [][]string) (err error) {
 	// Write the transformed dataset back to disk with the header preserved.
 	file, err := os.Create(path)
@@ -233,4 +236,91 @@ func writeCSV(path string, header []string, rows [][]string) (err error) {
 	}
 
 	return nil
+}
+
+func parseWorker(jobs <-chan rowJob, results chan<- rowResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for job := range jobs {
+		row, err := processRecord(job.record)
+		results <- rowResult{
+			index:   job.index,
+			lineNum: job.lineNum,
+			row:     row,
+			err:     err,
+		}
+	}
+}
+
+func processRecord(record []string) (encodedRow, error) {
+	if len(record) != 6 {
+		return encodedRow{}, fmt.Errorf("has %d columns, expected 6", len(record))
+	}
+
+	encoded, label, err := encodeSpecies(record[5])
+	if err != nil {
+		return encodedRow{}, err
+	}
+
+	values := append([]string{}, record[:5]...)
+	values = append(values, encoded...)
+
+	return encodedRow{
+		values: values,
+		label:  label,
+	}, nil
+}
+
+func main() {
+	// Accept CLI flags so the split script can be reused with different ratios,
+	// output files, and random seeds.
+	inputPath := flag.String("input", "Iris.csv", "input CSV file")
+	trainPath := flag.String("train", "train.csv", "output training CSV file")
+	validationPath := flag.String("validation", "validation.csv", "output validation CSV file")
+	testPath := flag.String("test", "test.csv", "output test CSV file")
+	trainRatio := flag.Float64("train-ratio", 0.7, "fraction of rows per class for training")
+	validationRatio := flag.Float64("validation-ratio", 0.15, "fraction of rows per class for validation")
+	testRatio := flag.Float64("test-ratio", 0.15, "fraction of rows per class for testing")
+	seed := flag.Int64("seed", time.Now().UnixNano(), "random seed for shuffling")
+
+	workers := flag.Int("workers", runtime.NumCPU(), "number of worker goroutines for row parsing")
+	flag.Parse()
+
+	if *workers < 1 {
+		log.Fatal("workers must be at least 1")
+	}
+
+	if err := validateRatios(*trainRatio, *validationRatio, *testRatio); err != nil {
+		log.Fatal(err)
+	}
+	startTime := time.Now()
+
+	header, rows, err := readAndEncodeRows(*inputPath, *workers)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Split by class so each output file keeps a similar class distribution.
+	trainRows, validationRows, testRows, err := stratifiedSplit(rows, *trainRatio, *validationRatio, *testRatio, *seed)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := writeCSV(*trainPath, header, trainRows); err != nil {
+		log.Fatalf("write train csv: %v", err)
+	}
+	if err := writeCSV(*validationPath, header, validationRows); err != nil {
+		log.Fatalf("write validation csv: %v", err)
+	}
+	if err := writeCSV(*testPath, header, testRows); err != nil {
+		log.Fatalf("write test csv: %v", err)
+	}
+
+	duration := time.Since(startTime)
+	fmt.Printf("Splitting data set with %d rows in %v\n\n", len(rows), duration)
+
+	fmt.Printf("Created %s with %d rows\n", *trainPath, len(trainRows))
+	fmt.Printf("Created %s with %d rows\n", *validationPath, len(validationRows))
+	fmt.Printf("Created %s with %d rows\n", *testPath, len(testRows))
+	fmt.Printf("Processed rows with %d worker goroutines\n", *workers)
+
 }

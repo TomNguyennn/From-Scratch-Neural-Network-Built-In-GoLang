@@ -69,9 +69,9 @@ func main() {
 	fmt.Printf("Training completed in %v\n\n", trainingDuration)
 
 	// Report performance on all three splits so training quality is easy to inspect.
-	trainAcc, trainLoss := irisnn.EvaluateSplit("Train", network, trainSet)
-	valAcc, valLoss := irisnn.EvaluateSplit("Validation", network, validationSet)
-	testAcc, testLoss := irisnn.EvaluateSplit("Test", network, testSet)
+	trainLoss, trainAcc := irisnn.EvaluateSplit("Train", network, trainSet)
+	valLoss, valAcc := irisnn.EvaluateSplit("Validation", network, validationSet)
+	testLoss, testAcc := irisnn.EvaluateSplit("Test", network, testSet)
 
 	metrics := irisnn.EvaluationMetrics{
 		TrainLoss: trainLoss,

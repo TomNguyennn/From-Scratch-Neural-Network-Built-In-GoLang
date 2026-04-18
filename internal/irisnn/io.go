@@ -7,27 +7,23 @@ import (
 	"gonum.org/v1/gonum/mat"
 )
 
-
-
 type ModelArtifact struct {
 	Weights     [][]float64 `json:"weights"`
 	Biases      [][]float64 `json:"biases"`
 	LayerShapes [][]int     `json:"layer_shapes"`
 
-	Config 	NeuralNetConfig `json:"config"`
-	ScalerStats  *FeatureScaler `json:"scaler_stats"`
-	LabelNames   map[int]string     `json:"label_names"`
-	
+	Config      NeuralNetConfig `json:"config"`
+	ScalerStats *FeatureScaler  `json:"scaler_stats"`
+	LabelNames  map[int]string  `json:"label_names"`
+
 	Metrics EvaluationMetrics
 }
-
 
 func (nn *NeuralNetwork) SavePreTrainedModel(filepath string, metrics EvaluationMetrics) error {
 
 	hwRows, hwCols := nn.wHidden.Dims()
 	owRows, owCols := nn.wOutput.Dims()
 
-	
 	weights := [][]float64{
 		nn.wHidden.RawMatrix().Data,
 		nn.wOutput.RawMatrix().Data,
@@ -42,37 +38,37 @@ func (nn *NeuralNetwork) SavePreTrainedModel(filepath string, metrics Evaluation
 		{hwRows, hwCols},
 		{owRows, owCols},
 	}
-	
+
 	myLabels := map[int]string{
-    0: "Ssetosa",
-    1: "Versicolor",
-    2: "Virginica",
-}
+		0: "Setosa",
+		1: "Versicolor",
+		2: "Virginica",
+	}
 
 	artifact := ModelArtifact{
-		Weights: weights,
-		Biases: biases,
+		Weights:     weights,
+		Biases:      biases,
 		LayerShapes: shapes,
-		Config: nn.config,
+		Config:      nn.config,
 		ScalerStats: nn.scaler,
-		LabelNames: myLabels,
-		Metrics: metrics,
+		LabelNames:  myLabels,
+		Metrics:     metrics,
 	}
 
 	data, err := json.MarshalIndent(artifact, "", "  ")
-    if err != nil {
-        return err
-    }
+	if err != nil {
+		return err
+	}
 
-    return os.WriteFile(filepath, data, 0644)
+	return os.WriteFile(filepath, data, 0644)
 }
 
-func LoadModel(filepath string) (*NeuralNetwork, error) {
+func LoadModel(filepath string) (*NeuralNetwork, *FeatureScaler, *ModelArtifact, error) {
 	data, err := os.ReadFile(filepath)
 
 	//io error handling
 	if err != nil {
-		return nil, err 
+		return nil, nil, nil, err
 	}
 
 	//parsing json stat to new neural net
@@ -80,7 +76,7 @@ func LoadModel(filepath string) (*NeuralNetwork, error) {
 	err = json.Unmarshal(data, &artifact)
 
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	hiddenWeights := mat.NewDense(
@@ -89,29 +85,32 @@ func LoadModel(filepath string) (*NeuralNetwork, error) {
 		artifact.Weights[0],
 	)
 
-	hiddenBiases := mat.NewDense(len(artifact.Biases[0]), 1, artifact.Biases[0])
+	hiddenBiases := mat.NewDense(1, len(artifact.Biases[0]), artifact.Biases[0])
 
 	outputWeights := mat.NewDense(
-		artifact.LayerShapes[1][0], 
-		artifact.LayerShapes[1][1], 
+		artifact.LayerShapes[1][0],
+		artifact.LayerShapes[1][1],
 		artifact.Weights[1],
 	)
-	outputBiases := mat.NewDense(len(artifact.Biases[1]), 1, artifact.Biases[1])
+	outputBiases := mat.NewDense(1, len(artifact.Biases[1]), artifact.Biases[1])
 
 	nn := &NeuralNetwork{
-		config: artifact.Config,
-		scaler: artifact.ScalerStats,
+		config:  artifact.Config,
+		scaler:  artifact.ScalerStats,
 		wHidden: hiddenWeights,
 		bHidden: hiddenBiases,
 		wOutput: outputWeights,
 		bOutput: outputBiases,
 	}
 
-	return nn, nil
+	featureScaler := &FeatureScaler{
+		Mean: artifact.ScalerStats.Mean,
+		Std:  artifact.ScalerStats.Std,
+	}
+
+	return nn, featureScaler, &artifact, nil
 }
 
-func main(){
-	
+func main() {
+
 }
-
-
