@@ -250,14 +250,14 @@ func writePredictionCSV(path string, header []string, results []Result) (err err
 }
 
 func main() {
-	modelPath := flag.String("model", "model.json", "Path to the pre-trained model")
+	modelPath := flag.String("model", "iris-datasets/model.json", "Path to the pre-trained model")
 	sepalLength := flag.Float64("sepal-length", 0.0, "Sepal length in cm")
 	sepalWidth := flag.Float64("sepal-width", 0.0, "Sepal width in cm")
 	petalLength := flag.Float64("petal-length", 0.0, "Petal length in cm")
 	petalWidth := flag.Float64("petal-width", 0.0, "Petal width in cm")
 
 	batchInput := flag.String("batch-input", "", "Path to input CSV for batch processing")
-	batchOutput := flag.String("batch-output", "predictions.csv", "Path to save batch results")
+	batchOutput := flag.String("batch-output", "iris-datasets/predictions.csv", "Path to save batch results")
 	workers := flag.Int("workers", 1, "Number of concurrent workers for batch mode")
 	benchmarkRepeats := flag.Int("benchmark-repeats", 1, "Number of times to run batch for benchmarking")
 	flag.Parse()

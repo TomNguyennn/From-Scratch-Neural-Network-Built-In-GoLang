@@ -3,94 +3,104 @@ package irisnn
 import (
 	"fmt"
 	"math"
-	"os"
-	"encoding/csv"
-	"strconv"
+
 	"gonum.org/v1/gonum/mat"
 )
-// dataset keeps one split of the Iris data in matrix form.
+
+// Dataset keeps one dataset split in matrix form.
 type Dataset struct {
 	Inputs *mat.Dense
 	Labels *mat.Dense
 	Rows   int
 }
 
-
-
-
-func argmaxRow(m *mat.Dense, row int) int {
-	_, cols := m.Dims()
-	bestIndex := 0
-	bestValue := m.At(row, 0)
-	for c := 1; c < cols; c++ {
-		if v := m.At(row, c); v > bestValue {
-			bestValue = v
-			bestIndex = c
-		}
+func NewDataset(inputs, labels *mat.Dense) (*Dataset, error) {
+	if inputs == nil {
+		return nil, fmt.Errorf("inputs matrix is nil")
 	}
-	return bestIndex
-}
-
-
-
-func LoadDataset(path string) (*Dataset, error) {
-	// The split files contain:
-	// Id, 4 numeric features, and 3 one-hot output columns.
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	if len(records) < 2 {
-		return nil, fmt.Errorf("%s must contain a header and at least one data row", path)
+	if labels == nil {
+		return nil, fmt.Errorf("labels matrix is nil")
 	}
 
-	samples := len(records) - 1
-	inputsData := make([]float64, samples*4)
-	labelsData := make([]float64, samples*3)
-
-	inputIndex := 0
-	labelIndex := 0
-	for rowIndex, record := range records[1:] {
-		if len(record) != 8 {
-			return nil, fmt.Errorf("%s row %d has %d columns, expected 8", path, rowIndex+2, len(record))
-		}
-
-		for _, field := range record[1:5] {
-			value, err := strconv.ParseFloat(field, 64)
-			if err != nil {
-				return nil, fmt.Errorf("%s row %d feature parse error: %w", path, rowIndex+2, err)
-			}
-			inputsData[inputIndex] = value
-			inputIndex++
-		}
-
-		for _, field := range record[5:8] {
-			value, err := strconv.ParseFloat(field, 64)
-			if err != nil {
-				return nil, fmt.Errorf("%s row %d label parse error: %w", path, rowIndex+2, err)
-			}
-			labelsData[labelIndex] = value
-			labelIndex++
-		}
+	rows, inputCols := inputs.Dims()
+	labelRows, labelCols := labels.Dims()
+	if rows == 0 || labelRows == 0 {
+		return nil, fmt.Errorf("dataset is empty")
+	}
+	if rows != labelRows {
+		return nil, fmt.Errorf("input rows (%d) do not match label rows (%d)", rows, labelRows)
+	}
+	if inputCols == 0 {
+		return nil, fmt.Errorf("dataset inputs must have at least one column")
+	}
+	if labelCols == 0 {
+		return nil, fmt.Errorf("dataset labels must have at least one column")
 	}
 
 	return &Dataset{
-		Inputs: mat.NewDense(samples, 4, inputsData),
-		Labels: mat.NewDense(samples, 3, labelsData),
-		Rows:   samples,
+		Inputs: inputs,
+		Labels: labels,
+		Rows:   rows,
 	}, nil
 }
 
+func NewDatasetFromRaw(inputsData []float64, rows, inputWidth int, labelsData []float64, outputWidth int) (*Dataset, error) {
+	if rows <= 0 {
+		return nil, fmt.Errorf("rows must be greater than 0")
+	}
+	if inputWidth <= 0 {
+		return nil, fmt.Errorf("input width must be greater than 0")
+	}
+	if outputWidth <= 0 {
+		return nil, fmt.Errorf("output width must be greater than 0")
+	}
+	if len(inputsData) != rows*inputWidth {
+		return nil, fmt.Errorf("got %d input values, want %d", len(inputsData), rows*inputWidth)
+	}
+	if len(labelsData) != rows*outputWidth {
+		return nil, fmt.Errorf("got %d label values, want %d", len(labelsData), rows*outputWidth)
+	}
+
+	return NewDataset(
+		mat.NewDense(rows, inputWidth, inputsData),
+		mat.NewDense(rows, outputWidth, labelsData),
+	)
+}
+
+func BinaryLabelsToOneHot(labels []int) (*mat.Dense, error) {
+	if len(labels) == 0 {
+		return nil, fmt.Errorf("binary labels are empty")
+	}
+
+	data := make([]float64, len(labels)*2)
+	for i, label := range labels {
+		switch label {
+		case 0:
+			data[i*2] = 1
+		case 1:
+			data[i*2+1] = 1
+		default:
+			return nil, fmt.Errorf("binary label at row %d must be 0 or 1, got %d", i, label)
+		}
+	}
+
+	return mat.NewDense(len(labels), 2, data), nil
+}
+
+func NewBinaryDataset(inputs *mat.Dense, labels []int) (*Dataset, error) {
+	encodedLabels, err := BinaryLabelsToOneHot(labels)
+	if err != nil {
+		return nil, err
+	}
+	return NewDataset(inputs, encodedLabels)
+}
+
+type FeatureScaler struct {
+	Mean []float64 `json:"mean"`
+	Std  []float64 `json:"std"`
+}
+
 func FitFeatureScaler(inputs *mat.Dense) *FeatureScaler {
-	// Normalize each feature column to roughly zero mean and unit variance.
-	// This makes gradient descent converge more reliably.
 	rows, cols := inputs.Dims()
 	mean := make([]float64, cols)
 	std := make([]float64, cols)
@@ -127,4 +137,3 @@ func (s *FeatureScaler) Transform(inputs *mat.Dense) *mat.Dense {
 	}
 	return out
 }
-

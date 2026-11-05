@@ -1,2 +1,5 @@
 .cache
 .gocache
+.benchbin
+transactions_fraud_nn.go
+credit-card-fraud-datasets

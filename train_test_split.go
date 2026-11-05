@@ -273,10 +273,10 @@ func processRecord(record []string) (encodedRow, error) {
 func main() {
 	// Accept CLI flags so the split script can be reused with different ratios,
 	// output files, and random seeds.
-	inputPath := flag.String("input", "Iris.csv", "input CSV file")
-	trainPath := flag.String("train", "train.csv", "output training CSV file")
-	validationPath := flag.String("validation", "validation.csv", "output validation CSV file")
-	testPath := flag.String("test", "test.csv", "output test CSV file")
+	inputPath := flag.String("input", "iris-datasets/Iris.csv", "input CSV file")
+	trainPath := flag.String("train", "iris-datasets/train.csv", "output training CSV file")
+	validationPath := flag.String("validation", "iris-datasets/validation.csv", "output validation CSV file")
+	testPath := flag.String("test", "iris-datasets/test.csv", "output test CSV file")
 	trainRatio := flag.Float64("train-ratio", 0.7, "fraction of rows per class for training")
 	validationRatio := flag.Float64("validation-ratio", 0.15, "fraction of rows per class for validation")
 	testRatio := flag.Float64("test-ratio", 0.15, "fraction of rows per class for testing")

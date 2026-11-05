@@ -1,0 +1,65 @@
+package tests
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestTransactionsFraudTrainAndPredictCSV(t *testing.T) {
+	tempDir := t.TempDir()
+	trainPath := filepath.Join(tempDir, "train.csv")
+	validationPath := filepath.Join(tempDir, "validation.csv")
+	testPath := filepath.Join(tempDir, "test.csv")
+	modelPath := filepath.Join(tempDir, "model.json")
+	outputPath := filepath.Join(tempDir, "predictions.csv")
+
+	writeCSVFile(t, trainPath, [][]string{
+		{"step", "type", "amount", "nameOrig", "oldbalanceOrig", "newbalanceOrig", "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud"},
+		{"1", "PAYMENT", "100.0", "C1", "1000.0", "900.0", "M1", "0.0", "0.0", "0"},
+		{"2", "TRANSFER", "5000.0", "C2", "5000.0", "0.0", "C9", "0.0", "0.0", "1"},
+		{"3", "CASH_OUT", "3000.0", "C3", "3000.0", "0.0", "C10", "100.0", "3100.0", "1"},
+		{"4", "PAYMENT", "150.0", "C4", "1000.0", "850.0", "M2", "0.0", "0.0", "0"},
+	})
+	writeCSVFile(t, validationPath, [][]string{
+		{"step", "type", "amount", "nameOrig", "oldbalanceOrig", "newbalanceOrig", "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud"},
+		{"5", "TRANSFER", "4000.0", "C5", "4000.0", "0.0", "C11", "0.0", "0.0", "1"},
+		{"6", "PAYMENT", "90.0", "C6", "900.0", "810.0", "M3", "0.0", "0.0", "0"},
+	})
+	writeCSVFile(t, testPath, [][]string{
+		{"step", "type", "amount", "nameOrig", "oldbalanceOrig", "newbalanceOrig", "nameDest", "oldbalanceDest", "newbalanceDest", "isFraud"},
+		{"7", "CASH_OUT", "4500.0", "C7", "4500.0", "0.0", "C12", "50.0", "4550.0", "1"},
+		{"8", "PAYMENT", "70.0", "C8", "700.0", "630.0", "M4", "0.0", "0.0", "0"},
+	})
+
+	runGoCommand(
+		t,
+		"run", "transactions_fraud.go",
+		"--mode", "train",
+		"--train-input", trainPath,
+		"--validation-input", validationPath,
+		"--test-input", testPath,
+		"--model", modelPath,
+		"--epochs", "2",
+		"--learning-rate", "0.05",
+		"--l2", "0.00001",
+		"--threshold-step", "0.1",
+	)
+
+	runGoCommand(
+		t,
+		"run", "transactions_fraud.go",
+		"--mode", "predict-csv",
+		"--model", modelPath,
+		"--input", validationPath,
+		"--output", outputPath,
+		"--workers", "2",
+	)
+
+	rows := readCSVFile(t, outputPath)
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows in prediction output, want 3", len(rows))
+	}
+	if got := rows[0][10]; got != "predicted_probability" {
+		t.Fatalf("unexpected output header %q", got)
+	}
+}
