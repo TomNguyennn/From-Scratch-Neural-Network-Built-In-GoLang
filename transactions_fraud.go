@@ -26,7 +26,7 @@ const (
 	numericFeatureCount     = 8
 	categoricalFeatureCount = 6
 	fraudInputFeatures      = numericFeatureCount + categoricalFeatureCount
-	fraudOutputClasses      = 2
+	fraudOutputClasses      = 1
 	defaultHiddenNeurons    = 16
 )
 
@@ -134,6 +134,7 @@ func main() {
 
 	switch *mode {
 	case "train":
+		fmt.Printf("Training with threshold = %.2f\n", defaultCutoff)
 		model, err := trainFraudModel(
 			*trainInput,
 			*validationInput,
@@ -239,6 +240,7 @@ func trainFraudModel(
 	}
 
 	config := irisnn.NeuralNetConfig{
+		Loss:          "bce",
 		InputNeurons:  fraudInputFeatures,
 		OutputNeurons: fraudOutputClasses,
 		HiddenNeurons: hiddenNeurons,
@@ -266,7 +268,7 @@ func trainFraudModel(
 	}
 
 	fmt.Printf(
-		"Training complete - train loss %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | val loss %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | test loss %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | threshold %.2f\n",
+		"Training complete - train bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | val bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | test bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | threshold %.2f\n",
 		trainMetrics.Loss,
 		trainMetrics.Accuracy,
 		trainMetrics.Precision,
@@ -376,10 +378,14 @@ func buildFraudDataset(raw *fraudRawData, scaler *irisnn.FeatureScaler) (*irisnn
 		)
 	}
 
-	return irisnn.NewBinaryDataset(
-		mat.NewDense(raw.Rows, fraudInputFeatures, inputsData),
-		raw.Labels,
-	)
+	labels := make([]float64, raw.Rows)
+	for i, y := range raw.Labels {
+		if y != 0 && y != 1 {
+			return nil, fmt.Errorf("invalid binary label at row %d", i)
+		}
+		labels[i] = float64(y)
+	}
+	return irisnn.NewDataset(mat.NewDense(raw.Rows, fraudInputFeatures, inputsData), mat.NewDense(raw.Rows, 1, labels))
 }
 
 func tuneThreshold(network *irisnn.NeuralNetwork, validationSet *irisnn.Dataset, step float64) (float64, metrics, error) {
@@ -602,7 +608,11 @@ func predictRecord(model *fraudModel, rec record) (float64, int, error) {
 		return 0, 0, err
 	}
 
-	probability := predictions.At(0, 1)
+	probabilities, err := irisnn.BinaryPositiveClassProbabilities(predictions)
+	if err != nil {
+		return 0, 0, err
+	}
+	probability := probabilities[0]
 	label := 0
 	if probability >= model.Threshold {
 		label = 1

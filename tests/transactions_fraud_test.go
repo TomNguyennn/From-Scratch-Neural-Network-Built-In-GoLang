@@ -1,11 +1,20 @@
 package tests
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestTransactionsFraudTrainAndPredictCSV(t *testing.T) {
+	for _, program := range []string{"transactions_fraud.go", "transactions_fraud_nn.go"} {
+		t.Run(program, func(t *testing.T) { testFraudCLI(t, program) })
+	}
+}
+
+func testFraudCLI(t *testing.T, program string) {
 	tempDir := t.TempDir()
 	trainPath := filepath.Join(tempDir, "train.csv")
 	validationPath := filepath.Join(tempDir, "validation.csv")
@@ -31,9 +40,9 @@ func TestTransactionsFraudTrainAndPredictCSV(t *testing.T) {
 		{"8", "PAYMENT", "70.0", "C8", "700.0", "630.0", "M4", "0.0", "0.0", "0"},
 	})
 
-	runGoCommand(
+	trainingOutput := runGoCommand(
 		t,
-		"run", "transactions_fraud.go",
+		"run", program,
 		"--mode", "train",
 		"--train-input", trainPath,
 		"--validation-input", validationPath,
@@ -45,9 +54,45 @@ func TestTransactionsFraudTrainAndPredictCSV(t *testing.T) {
 		"--threshold-step", "0.1",
 	)
 
+	if !strings.Contains(string(trainingOutput), "bce") {
+		t.Fatal("missing BCE report")
+	}
+	data, err := os.ReadFile(modelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact map[string]json.RawMessage
+	if err := json.Unmarshal(data, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Output int `json:"output_neurons"`
+	}
+	if program == "transactions_fraud_nn.go" {
+		if err := json.Unmarshal(artifact["config"], &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Output != 1 {
+			t.Fatalf("outputs = %d", cfg.Output)
+		}
+	} else {
+		var wrapped struct {
+			Config struct {
+				Output int    `json:"outputNeurons"`
+				Loss   string `json:"loss"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal(artifact["model"], &wrapped); err != nil {
+			t.Fatal(err)
+		}
+		if wrapped.Config.Output != 1 || wrapped.Config.Loss != "bce" {
+			t.Fatalf("config: %+v", wrapped.Config)
+		}
+	}
+
 	runGoCommand(
 		t,
-		"run", "transactions_fraud.go",
+		"run", program,
 		"--mode", "predict-csv",
 		"--model", modelPath,
 		"--input", validationPath,
@@ -55,6 +100,7 @@ func TestTransactionsFraudTrainAndPredictCSV(t *testing.T) {
 		"--workers", "2",
 	)
 
+	runGoCommand(t, "run", program, "--mode", "predict-one", "--model", modelPath, "--type", "PAYMENT")
 	rows := readCSVFile(t, outputPath)
 	if len(rows) != 3 {
 		t.Fatalf("got %d rows in prediction output, want 3", len(rows))

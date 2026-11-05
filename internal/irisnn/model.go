@@ -21,6 +21,7 @@ type NeuralNetwork struct {
 }
 
 type NeuralNetConfig struct {
+	Loss          string  `json:"loss,omitempty"`
 	InputNeurons  int     `json:"inputNeurons"`
 	OutputNeurons int     `json:"outputNeurons"`
 	HiddenNeurons int     `json:"hiddenNeurons"`
@@ -199,6 +200,21 @@ func (nn *NeuralNetwork) forward(x *mat.Dense) (*mat.Dense, *mat.Dense) {
 }
 
 func (nn *NeuralNetwork) Train(x, y *mat.Dense) error {
+	if x == nil || y == nil {
+		return fmt.Errorf("training inputs and labels must not be nil")
+	}
+	if nn.config.Loss != "" && nn.config.Loss != "mse" && nn.config.Loss != "bce" {
+		return fmt.Errorf("unsupported loss %q", nn.config.Loss)
+	}
+	if nn.config.Loss == "bce" {
+		_, cols := y.Dims()
+		if nn.config.OutputNeurons != 1 || cols != 1 {
+			return fmt.Errorf("BCE training requires one output and one label column")
+		}
+		if _, err := BinaryActualLabels(y); err != nil {
+			return err
+		}
+	}
 	samples, inputCols := x.Dims()
 	labelRows, labelCols := y.Dims()
 	if samples == 0 || labelRows == 0 {
@@ -218,7 +234,22 @@ func (nn *NeuralNetwork) Train(x, y *mat.Dense) error {
 		hiddenOutput, predictions := nn.forward(x)
 
 		outputError := subtractDense(predictions, y)
-		outputDelta := elementwiseMultiply(outputError, elementwiseSigmoidPrime(predictions))
+		outputDelta := outputError
+		if nn.config.Loss != "bce" {
+			outputDelta = elementwiseMultiply(outputError, elementwiseSigmoidPrime(predictions))
+		}
+		var loss float64
+		metric := "mse"
+		if nn.config.Loss == "bce" {
+			var err error
+			loss, err = BinaryCrossEntropy(predictions, y)
+			if err != nil {
+				return err
+			}
+			metric = "bce"
+		} else {
+			loss = MeanSquaredError(predictions, y)
+		}
 
 		wOutputT := mat.DenseCopyOf(nn.wOutput.T())
 		hiddenError := new(mat.Dense)
@@ -244,8 +275,7 @@ func (nn *NeuralNetwork) Train(x, y *mat.Dense) error {
 		subtractScaled(nn.wHidden, gradWHidden, nn.config.LearningRate)
 		subtractScaled(nn.bHidden, gradBHidden, nn.config.LearningRate)
 
-		loss := MeanSquaredError(predictions, y)
-		fmt.Printf("Epoch %d/%d - loss: %.6f\n", epoch+1, nn.config.NumEpochs, loss)
+		fmt.Printf("Epoch %d/%d - %s: %.6f\n", epoch+1, nn.config.NumEpochs, metric, loss)
 
 	}
 

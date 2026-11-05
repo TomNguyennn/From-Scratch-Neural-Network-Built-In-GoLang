@@ -24,7 +24,14 @@ type BinaryMetrics struct {
 }
 
 func BinaryPositiveClassProbabilities(predictions *mat.Dense) ([]float64, error) {
-	return PositiveClassProbabilities(predictions, 1)
+	if predictions == nil {
+		return nil, fmt.Errorf("predictions matrix is nil")
+	}
+	_, cols := predictions.Dims()
+	if cols != 1 && cols != 2 {
+		return nil, fmt.Errorf("binary predictions must have 1 or 2 columns, got %d", cols)
+	}
+	return PositiveClassProbabilities(predictions, cols-1)
 }
 
 func PositiveClassProbabilities(predictions *mat.Dense, positiveClass int) ([]float64, error) {
@@ -42,7 +49,11 @@ func PositiveClassProbabilities(predictions *mat.Dense, positiveClass int) ([]fl
 
 	probabilities := make([]float64, rows)
 	for r := 0; r < rows; r++ {
-		probabilities[r] = predictions.At(r, positiveClass)
+		p := predictions.At(r, positiveClass)
+		if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+			return nil, fmt.Errorf("invalid probability at row %d", r)
+		}
+		probabilities[r] = p
 	}
 	return probabilities, nil
 }
@@ -56,13 +67,20 @@ func BinaryActualLabels(labels *mat.Dense) ([]int, error) {
 	if rows == 0 {
 		return nil, fmt.Errorf("labels matrix is empty")
 	}
-	if cols != 2 {
-		return nil, fmt.Errorf("binary labels must have 2 output columns, got %d", cols)
+	if cols != 1 && cols != 2 {
+		return nil, fmt.Errorf("binary labels must have 1 or 2 output columns, got %d", cols)
 	}
 
 	actuals := make([]int, rows)
 	for r := 0; r < rows; r++ {
-		actuals[r] = argmaxRow(labels, r)
+		y := labels.At(r, cols-1)
+		if y != 0 && y != 1 {
+			return nil, fmt.Errorf("invalid binary label at row %d", r)
+		}
+		if cols == 2 && labels.At(r, 0) != 1-y {
+			return nil, fmt.Errorf("invalid one-hot label at row %d", r)
+		}
+		actuals[r] = int(y)
 	}
 	return actuals, nil
 }
@@ -74,13 +92,13 @@ func EvaluateBinaryThreshold(probabilities []float64, actuals []int, threshold f
 	if len(probabilities) != len(actuals) {
 		return BinaryMetrics{}, fmt.Errorf("probabilities length (%d) does not match actual labels length (%d)", len(probabilities), len(actuals))
 	}
-	if threshold < 0 || threshold > 1 {
+	if math.IsNaN(threshold) || threshold < 0 || threshold > 1 {
 		return BinaryMetrics{}, fmt.Errorf("threshold must be between 0 and 1, got %f", threshold)
 	}
 
 	metrics := BinaryMetrics{Threshold: threshold}
 	for i, probability := range probabilities {
-		if probability < 0 || probability > 1 {
+		if math.IsNaN(probability) || probability < 0 || probability > 1 {
 			return BinaryMetrics{}, fmt.Errorf("probability at row %d must be between 0 and 1, got %f", i, probability)
 		}
 		actual := actuals[i]
@@ -98,8 +116,7 @@ func EvaluateBinaryThreshold(probabilities []float64, actuals []int, threshold f
 			metrics.PosRate++
 		}
 
-		clipped := math.Min(math.Max(probability, 1e-9), 1-1e-9)
-		metrics.Loss += -(float64(actual)*math.Log(clipped) + float64(1-actual)*math.Log(1-clipped))
+		metrics.Loss += binaryCrossEntropy(probability, float64(actual))
 
 		switch {
 		case predicted == 1 && actual == 1:
@@ -147,4 +164,29 @@ func EvaluateBinaryOutputs(predictions, labels *mat.Dense, threshold float64) (B
 	}
 
 	return EvaluateBinaryThreshold(probabilities, actuals, threshold)
+}
+
+func binaryCrossEntropy(p, y float64) float64 {
+	p = math.Min(math.Max(p, 1e-9), 1-1e-9)
+	return -(y*math.Log(p) + (1-y)*math.Log1p(-p))
+}
+
+// BinaryCrossEntropy returns mean BCE over the fraud probabilities.
+func BinaryCrossEntropy(predictions, labels *mat.Dense) (float64, error) {
+	probabilities, err := BinaryPositiveClassProbabilities(predictions)
+	if err != nil {
+		return 0, err
+	}
+	actuals, err := BinaryActualLabels(labels)
+	if err != nil {
+		return 0, err
+	}
+	if len(probabilities) != len(actuals) {
+		return 0, fmt.Errorf("prediction and label rows differ")
+	}
+	var loss float64
+	for i, p := range probabilities {
+		loss += binaryCrossEntropy(p, float64(actuals[i]))
+	}
+	return loss / float64(len(probabilities)), nil
 }

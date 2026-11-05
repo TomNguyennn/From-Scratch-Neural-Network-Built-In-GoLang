@@ -230,3 +230,24 @@ Run only the fraud workflow test:
 ```bash
 env GOCACHE=/tmp/go-cache go test ./tests -run TestTransactionsFraudTrainAndPredictCSV
 ```
+
+## Fraud training loss
+
+Both `transactions_fraud.go` and `transactions_fraud_nn.go` train with binary
+cross-entropy (BCE) and one sigmoid output representing P(fraud). Labels remain
+0 for non-fraud and 1 for fraud. Console loss is labelled `bce`; saved JSON uses
+`loss`. The shared network records `config.loss = "bce"`; omitted loss settings
+retain the Iris MSE behavior.
+
+The shared trainer logs BCE before each epoch's update; its final summary uses
+the updated model. The standalone trainer evaluates after each update. BCE does
+not depend on the decision threshold; validation F2 still selects that threshold.
+Both programs can predict with their existing two-output model formats using
+output column 1. New models use column 0. Retraining is required to adopt BCE;
+changing the loss does not guarantee higher fraud recall.
+
+Standalone trainer checks:
+
+```bash
+env GOCACHE=/tmp/go-cache go test transactions_fraud_nn.go transactions_fraud_nn_test.go
+```
