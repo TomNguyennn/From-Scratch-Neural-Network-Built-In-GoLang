@@ -33,18 +33,19 @@ const (
 var transactionTypes = []string{"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
 type metrics struct {
-	Loss      float64 `json:"loss"`
-	Accuracy  float64 `json:"accuracy"`
-	Precision float64 `json:"precision"`
-	Recall    float64 `json:"recall"`
-	F1        float64 `json:"f1"`
-	F2        float64 `json:"f2"`
-	PosRate   float64 `json:"positive_rate"`
-	Rows      int64   `json:"rows"`
-	TruePos   int64   `json:"true_pos"`
-	FalsePos  int64   `json:"false_pos"`
-	TrueNeg   int64   `json:"true_neg"`
-	FalseNeg  int64   `json:"false_neg"`
+	AveragePrecision float64 `json:"average_precision"`
+	Loss             float64 `json:"loss"`
+	Accuracy         float64 `json:"accuracy"`
+	Precision        float64 `json:"precision"`
+	Recall           float64 `json:"recall"`
+	F1               float64 `json:"f1"`
+	F2               float64 `json:"f2"`
+	PosRate          float64 `json:"positive_rate"`
+	Rows             int64   `json:"rows"`
+	TruePos          int64   `json:"true_pos"`
+	FalsePos         int64   `json:"false_pos"`
+	TrueNeg          int64   `json:"true_neg"`
+	FalseNeg         int64   `json:"false_neg"`
 }
 
 type trainingSummary struct {
@@ -268,22 +269,22 @@ func trainFraudModel(
 	}
 
 	fmt.Printf(
-		"Training complete - train bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | val bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | test bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f | threshold %.2f\n",
+		"Training complete - train bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | val bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | test bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | threshold %.2f\n",
 		trainMetrics.Loss,
 		trainMetrics.Accuracy,
 		trainMetrics.Precision,
 		trainMetrics.Recall,
-		trainMetrics.F2,
+		trainMetrics.F2, trainMetrics.AveragePrecision,
 		valMetrics.Loss,
 		valMetrics.Accuracy,
 		valMetrics.Precision,
 		valMetrics.Recall,
-		valMetrics.F2,
+		valMetrics.F2, valMetrics.AveragePrecision,
 		testMetrics.Loss,
 		testMetrics.Accuracy,
 		testMetrics.Precision,
 		testMetrics.Recall,
-		testMetrics.F2,
+		testMetrics.F2, testMetrics.AveragePrecision,
 		threshold,
 	)
 
@@ -434,7 +435,8 @@ func tuneThreshold(network *irisnn.NeuralNetwork, validationSet *irisnn.Dataset,
 		bestThreshold = defaultCutoff
 	}
 
-	return bestThreshold, bestMetrics, nil
+	bestMetrics.AveragePrecision, err = irisnn.AveragePrecision(probabilities, actuals)
+	return bestThreshold, bestMetrics, err
 }
 
 func betterThresholdCandidate(current metrics, currentThreshold float64, best metrics, bestThreshold float64) bool {
@@ -468,7 +470,17 @@ func evaluateModel(network *irisnn.NeuralNetwork, dataset *irisnn.Dataset, thres
 		return metrics{}, err
 	}
 
-	return toMetrics(binaryMetrics), nil
+	result := toMetrics(binaryMetrics)
+	probabilities, err := irisnn.BinaryPositiveClassProbabilities(predictions)
+	if err != nil {
+		return metrics{}, err
+	}
+	actuals, err := irisnn.BinaryActualLabels(dataset.Labels)
+	if err != nil {
+		return metrics{}, err
+	}
+	result.AveragePrecision, err = irisnn.AveragePrecision(probabilities, actuals)
+	return result, err
 }
 
 func predictCSV(model *fraudModel, inputPath, outputPath string, maxRows int, workers int) error {

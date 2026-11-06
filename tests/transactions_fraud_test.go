@@ -2,8 +2,10 @@ package tests
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -65,6 +67,29 @@ func testFraudCLI(t *testing.T, program string) {
 	if err := json.Unmarshal(data, &artifact); err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(string(trainingOutput), "ap") {
+		t.Fatal("missing AP report")
+	}
+	var rawSummary map[string]json.RawMessage
+	summary := make(map[string]struct {
+		AP *float64 `json:"average_precision"`
+	})
+	if err := json.Unmarshal(artifact["summary"], &rawSummary); err != nil {
+		t.Fatal(err)
+	}
+	for _, split := range []string{"train", "validation", "test"} {
+		var metric struct {
+			AP *float64 `json:"average_precision"`
+		}
+		if err := json.Unmarshal(rawSummary[split], &metric); err != nil {
+			t.Fatal(err)
+		}
+		summary[split] = metric
+		ap := metric.AP
+		if ap == nil || *ap < 0 || *ap > 1 {
+			t.Fatalf("invalid AP for %s", split)
+		}
+	}
 	var cfg struct {
 		Output int `json:"output_neurons"`
 	}
@@ -104,6 +129,23 @@ func testFraudCLI(t *testing.T, program string) {
 	rows := readCSVFile(t, outputPath)
 	if len(rows) != 3 {
 		t.Fatalf("got %d rows in prediction output, want 3", len(rows))
+	}
+	// Validation has exactly one positive (first row) and one negative.
+	positive, err := strconv.ParseFloat(rows[1][10], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	negative, err := strconv.ParseFloat(rows[2][10], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAP := 0.5
+	if positive > negative {
+		wantAP = 1
+	}
+	// CSV probabilities are rounded; only distinguish ordering when unambiguous.
+	if positive != negative && math.Abs(*summary["validation"].AP-wantAP) > 1e-12 {
+		t.Fatalf("validation AP %g want %g", *summary["validation"].AP, wantAP)
 	}
 	if got := rows[0][10]; got != "predicted_probability" {
 		t.Fatalf("unexpected output header %q", got)

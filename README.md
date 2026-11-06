@@ -251,3 +251,30 @@ Standalone trainer checks:
 ```bash
 env GOCACHE=/tmp/go-cache go test transactions_fraud_nn.go transactions_fraud_nn_test.go
 ```
+
+### Average Precision (AP)
+
+Both fraud programs report `ap` for each evaluated split and save it as
+`average_precision` in the split summary. This is the non-interpolated
+precision–recall summary: `AP = sum((recall increase) * precision)`, not
+trapezoidal PR-AUC. Higher values indicate better ranking of fraud cases.
+Equal scores are evaluated together; all tied scores yield the positive-class
+fraction. No positives yields 0; all positives yields 1.
+
+AP uses fraud probabilities across all score thresholds and does not depend on
+the chosen decision threshold. BCE training and validation F2 threshold selection
+are unchanged. Calculation sorts a copy of the scores, costing O(n log n) time
+and O(n) memory per evaluated split (each epoch in the standalone trainer).
+Old model files remain readable but do not contain historical AP measurements;
+missing values load as zero and must not be interpreted as measured AP.
+
+### Dataset class balance
+
+Run `go run ./helpers` from the repository root to print total rows, fraud and
+non-fraud counts, and their percentages for the training, validation, and test
+splits. It streams the CSV files without modifying them. Custom paths can be
+supplied with `--train-input`, `--validation-input`, and `--test-input`.
+
+The helper function `CalculateFraudStats` is in `helpers/dataset_balance.go`.
+It requires an `isFraud` column containing only `0` or `1` and rejects empty
+datasets instead of reporting misleading percentages.
