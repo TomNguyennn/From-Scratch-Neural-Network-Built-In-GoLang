@@ -110,6 +110,7 @@ func TestBinaryModelRoundTrip(t *testing.T) {
 		cfg := NeuralNetConfig{InputNeurons: 2, HiddenNeurons: 2, OutputNeurons: width, Seed: 42}
 		if width == 1 {
 			cfg.Loss = "bce"
+			cfg.PositiveWeight = 3
 		}
 		nn := NewNeuralNetwork(cfg, nil)
 		x := mat.NewDense(1, 2, []float64{0.2, 0.7})
@@ -129,7 +130,7 @@ func TestBinaryModelRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if artifact.Config.Loss != cfg.Loss {
+		if artifact.Config.Loss != cfg.Loss || artifact.Config.PositiveWeight != cfg.PositiveWeight {
 			t.Fatal("loss configuration changed")
 		}
 		p, err = loaded.Predict(x)
@@ -139,6 +140,41 @@ func TestBinaryModelRoundTrip(t *testing.T) {
 		after, err := BinaryPositiveClassProbabilities(p)
 		if err != nil || before[0] != after[0] {
 			t.Fatalf("width %d roundtrip: %v %v %v", width, before, after, err)
+		}
+	}
+}
+
+func TestWeightedBinaryCrossEntropy(t *testing.T) {
+	p := mat.NewDense(2, 1, []float64{0.2, 0.7})
+	y := mat.NewDense(2, 1, []float64{0, 1})
+	got, err := WeightedBinaryCrossEntropy(p, y, 3)
+	want := -(math.Log(0.8) + 3*math.Log(0.7)) / 2
+	if err != nil || math.Abs(got-want) > 1e-12 {
+		t.Fatalf("loss %g want %g: %v", got, want, err)
+	}
+	ordinary, _ := BinaryCrossEntropy(p, y)
+	one, err := WeightedBinaryCrossEntropy(p, y, 1)
+	if err != nil || one != ordinary {
+		t.Fatalf("weight 1: %g != %g: %v", one, ordinary, err)
+	}
+	for _, w := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+		if _, err := WeightedBinaryCrossEntropy(p, y, w); err == nil {
+			t.Fatalf("accepted weight %g", w)
+		}
+	}
+}
+
+func TestPositiveWeightConfigValidation(t *testing.T) {
+	x := mat.NewDense(2, 1, []float64{0, 1})
+	y := mat.NewDense(2, 1, []float64{0, 1})
+	for _, w := range []float64{-1, math.NaN(), math.Inf(1)} {
+		nn := NewNeuralNetwork(NeuralNetConfig{InputNeurons: 1, HiddenNeurons: 2, OutputNeurons: 1, Loss: "bce", PositiveWeight: w}, nil)
+		if err := nn.Train(x, y); err == nil {
+			t.Fatalf("accepted training weight %g", w)
+		}
+		artifact := nn.ModelArtifact(EvaluationMetrics{}, nil)
+		if _, _, err := LoadModelArtifact(&artifact); err == nil {
+			t.Fatalf("accepted saved weight %g", w)
 		}
 	}
 }

@@ -173,6 +173,14 @@ func binaryCrossEntropy(p, y float64) float64 {
 
 // BinaryCrossEntropy returns mean BCE over the fraud probabilities.
 func BinaryCrossEntropy(predictions, labels *mat.Dense) (float64, error) {
+	return WeightedBinaryCrossEntropy(predictions, labels, 1)
+}
+
+// WeightedBinaryCrossEntropy averages over rows, weighting only positive labels.
+func WeightedBinaryCrossEntropy(predictions, labels *mat.Dense, positiveWeight float64) (float64, error) {
+	if positiveWeight <= 0 || math.IsNaN(positiveWeight) || math.IsInf(positiveWeight, 0) {
+		return 0, fmt.Errorf("positive weight must be finite and greater than zero")
+	}
 	probabilities, err := BinaryPositiveClassProbabilities(predictions)
 	if err != nil {
 		return 0, err
@@ -186,7 +194,11 @@ func BinaryCrossEntropy(predictions, labels *mat.Dense) (float64, error) {
 	}
 	var loss float64
 	for i, p := range probabilities {
-		loss += binaryCrossEntropy(p, float64(actuals[i]))
+		term := binaryCrossEntropy(p, float64(actuals[i]))
+		if actuals[i] == 1 {
+			term *= positiveWeight
+		}
+		loss += term
 	}
 	return loss / float64(len(probabilities)), nil
 }

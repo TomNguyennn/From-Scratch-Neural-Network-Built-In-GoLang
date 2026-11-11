@@ -122,8 +122,7 @@ go run transactions_fraud.go \
   --epochs 10 \
   --learning-rate 0.01 \
   --hidden-neurons 16 \
-  --seed 42 \
-  --threshold-step 0.01
+  --seed 42
 ```
 
 Predict one transaction:
@@ -135,11 +134,7 @@ go run transactions_fraud.go \
   --step 1 \
   --type TRANSFER \
   --amount 5000 \
-  --oldbalance-orig 5000 \
-  --newbalance-orig 0 \
-  --name-dest C999 \
-  --oldbalance-dest 0 \
-  --newbalance-dest 0
+  --name-dest C999
 ```
 
 Predict a CSV with concurrency:
@@ -242,8 +237,9 @@ retain the Iris MSE behavior.
 The shared trainer logs BCE before each epoch's update; its final summary uses
 the updated model. The standalone trainer evaluates after each update. BCE does
 not depend on the decision threshold; validation F2 still selects that threshold.
-Both programs can predict with their existing two-output model formats using
-output column 1. New models use column 0. Retraining is required to adopt BCE;
+The historical standalone trainer retains two-output prediction support using
+column 1. The updated trainer requires its new balance-free feature schema.
+New single-output models use column 0. Retraining is required to adopt BCE;
 changing the loss does not guarantee higher fraud recall.
 
 Standalone trainer checks:
@@ -265,7 +261,7 @@ AP uses fraud probabilities across all score thresholds and does not depend on
 the chosen decision threshold. BCE training and validation F2 threshold selection
 are unchanged. Calculation sorts a copy of the scores, costing O(n log n) time
 and O(n) memory per evaluated split (each epoch in the standalone trainer).
-Old model files remain readable but do not contain historical AP measurements;
+Compatible older model files may lack historical AP measurements;
 missing values load as zero and must not be interpreted as measured AP.
 
 ### Dataset class balance
@@ -278,3 +274,119 @@ supplied with `--train-input`, `--validation-input`, and `--test-input`.
 The helper function `CalculateFraudStats` is in `helpers/dataset_balance.go`.
 It requires an `isFraud` column containing only `0` or `1` and rejects empty
 datasets instead of reporting misleading percentages.
+
+### Balance-free fraud features
+
+`transactions_fraud.go` uses 11 features: `log_amount_z`, `transfer_amount`,
+`cashout_amount`, `hour_sin`, `hour_cos`, five transaction-type indicators,
+and `dest_is_merchant`. Log amount is `log1p(amount)`, standardized using training
+statistics only (constant amounts use standard deviation 1). Each type-specific
+amount equals `log_amount_z` for that type, otherwise zero. Cyclic features use
+`step % 24` as simulation hour and are not standardized. Balance cells in CSVs
+are ignored, including blanks. Balance command-line flags are removed.
+
+Old feature schemas are rejected: retrain before using this program for prediction.
+`transactions_fraud_nn.go` is preserved as the historical balance-based reference;
+its existing feature-packing inconsistency remains and limits baseline comparisons.
+
+Feature tests: `go test transactions_fraud.go transactions_fraud_features_test.go`.
+
+### Two-hidden-layer fraud model
+
+New `transactions_fraud.go` training uses 11 inputs → 64 ReLU neurons → 32 ReLU
+neurons → 1 sigmoid output. Set widths with `--hidden-neurons` and
+`--hidden-neurons-2` (both positive). Hidden weights use seeded He initialization;
+BCE backpropagation uses ReLU derivative 1 above zero and 0 otherwise.
+
+The saved `hiddenNeurons2` configuration and three parameter matrices identify
+this architecture. Omitted/zero second-layer width preserves the shared library's
+legacy single sigmoid hidden layer, including Iris and compatible saved models.
+The historical standalone trainer is unchanged. Retrain to use the new architecture.
+
+
+### Weighted BCE and validation thresholds
+
+The active `transactions_fraud.go` trainer defaults to weighted BCE with positive
+weight `training legitimate rows / training fraud rows`. Only loaded training rows
+count (including the `--max-rows` limit); automatic weighting requires both classes.
+The loss is `-mean(w*y*log(p) + (1-y)*log(1-p))`, averaged over rows rather than
+summed weights. Fraud output gradients are multiplied by the same weight.
+
+Use the automatic ratio, or supply a smaller positive weight to experiment:
+
+```sh
+go run transactions_fraud.go --mode train --positive-weight auto --model weighted_fraud.json
+go run transactions_fraud.go --mode train --positive-weight 100 --model weighted_fraud_100.json
+```
+
+The resolved weight is printed and saved at `model.config.positive_weight`.
+Older models without this field retain ordinary BCE. Epoch logs show
+`weighted_bce`; final split results show ordinary `bce` alongside `weighted_bce`.
+In saved split summaries, `loss` remains ordinary BCE and `weighted_bce` uses the
+training weight for all three splits. Epoch metrics are measured after all updates in that epoch; final losses are
+measured after training.
+
+Each run prints a validation table of Threshold, Precision, Recall and F2 for
+0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.75 and 0.80, saved as
+`summary.validation_thresholds`. The operating threshold maximizes validation F2 by
+sorting scores and considering every distinct score with the `score >= threshold`
+rule. Ties within `1e-12` prefer higher recall, then higher precision, then a lower
+threshold. This takes O(N log N) time and O(N) extra memory. Validation must contain
+at least one fraud case; tuning errors stop training before a model is saved.
+Test metrics use the selected validation threshold. Selected thresholds are saved
+without rounding and printed with 17 significant digits.
+
+Remove `--threshold-step` from active-trainer commands: the flag and
+`summary.threshold_step` have been removed. Older saved models still use their
+saved thresholds unchanged; legacy JSON `threshold_step` fields are ignored.
+The historical `transactions_fraud_nn.go` still supports its grid-search flag.
+
+Larger positive weights can increase false positives. Compare lower weights on
+validation data; weighted sigmoid scores are not necessarily calibrated fraud
+probabilities. The historical standalone trainer is unchanged.
+
+### Mini-batch training
+
+The active fraud CLI defaults to `--batch-size 512 --epochs 1 --learning-rate 0.001`.
+Each epoch shuffles paired training rows using the configured seed and updates
+weights after each batch, including the shorter final batch. For 4,445,835 rows
+this means 8,684 updates, with 139 rows in the final batch. Positive-class weighting
+is still calculated from the entire loaded training split.
+
+Epoch logs now report training and validation BCE, weighted BCE and AP after the
+updates. Predictions for these evaluations are computed in chunks to bound hidden
+activation memory. Inspect the first epoch before increasing `--epochs`; old
+full-batch epoch counts are not comparable. Final threshold selection is unchanged.
+The saved `batch_size` configuration records the training setting; omitted/zero
+values retain full-batch behavior for shared-library callers and older models.
+
+```sh
+go run transactions_fraud.go --mode train --batch-size 512 --epochs 1 --learning-rate 0.001 --model minibatch_fraud.json
+```
+
+Final fraud training output also reports the mean, median, 90th and 99th
+percentiles of predicted fraud probabilities, grouped by the true legitimate/fraud
+label, for train, validation and test. These threshold-independent summaries are
+saved under each split's `probability_stats`. Percentiles use linear interpolation
+at `(count-1)*quantile`. Missing classes print N/A and serialize as null.
+The reusable helper is `irisnn.SummarizeClassProbabilities`; it validates inputs
+and leaves the supplied probabilities and labels unchanged. Summaries are computed
+only at final evaluation, not on every epoch.
+
+### Optimizer selection
+
+The active fraud CLI defaults to Adam. Switch to the previous mini-batch gradient
+descent with `--optimizer sgd`. Both use `--learning-rate` and the same averaged,
+positive-class-weighted gradients. Adam uses beta1=0.9, beta2=0.999 and epsilon=1e-8,
+with one shared timestep per batch and separate moments for every weight and bias.
+
+```sh
+go run transactions_fraud.go --optimizer adam --epochs 1 --model adam_fraud.json
+go run transactions_fraud.go --optimizer sgd --epochs 1 --model sgd_fraud.json
+```
+
+The optimizer choice is saved in `model.config.optimizer`. Missing values preserve
+SGD for older models and library callers. Adam state persists across training calls
+on the same network, but moments and timestep are not serialized: loading preserves
+predictions and starts fresh optimizer state for further training. Compare validation
+AP and BCE before increasing epochs; Adam is not guaranteed to improve results.

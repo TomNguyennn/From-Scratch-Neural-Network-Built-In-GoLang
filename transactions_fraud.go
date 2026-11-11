@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,11 +22,11 @@ import (
 )
 
 const (
-	defaultCutoff           = 0.5
+	defaultCutoff           = 0.3
 	expectedFields          = 10
-	numericFeatureCount     = 8
+	numericFeatureCount     = 1
 	categoricalFeatureCount = 6
-	fraudInputFeatures      = numericFeatureCount + categoricalFeatureCount
+	fraudInputFeatures      = 11
 	fraudOutputClasses      = 1
 	defaultHiddenNeurons    = 16
 )
@@ -33,37 +34,46 @@ const (
 var transactionTypes = []string{"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
 type metrics struct {
-	AveragePrecision float64 `json:"average_precision"`
-	Loss             float64 `json:"loss"`
-	Accuracy         float64 `json:"accuracy"`
-	Precision        float64 `json:"precision"`
-	Recall           float64 `json:"recall"`
-	F1               float64 `json:"f1"`
-	F2               float64 `json:"f2"`
-	PosRate          float64 `json:"positive_rate"`
-	Rows             int64   `json:"rows"`
-	TruePos          int64   `json:"true_pos"`
-	FalsePos         int64   `json:"false_pos"`
-	TrueNeg          int64   `json:"true_neg"`
-	FalseNeg         int64   `json:"false_neg"`
+	ProbabilityStats *irisnn.ClassProbabilityStats `json:"probability_stats,omitempty"`
+	WeightedBCE      float64                       `json:"weighted_bce"`
+	AveragePrecision float64                       `json:"average_precision"`
+	Loss             float64                       `json:"loss"`
+	Accuracy         float64                       `json:"accuracy"`
+	Precision        float64                       `json:"precision"`
+	Recall           float64                       `json:"recall"`
+	F1               float64                       `json:"f1"`
+	F2               float64                       `json:"f2"`
+	PosRate          float64                       `json:"positive_rate"`
+	Rows             int64                         `json:"rows"`
+	TruePos          int64                         `json:"true_pos"`
+	FalsePos         int64                         `json:"false_pos"`
+	TrueNeg          int64                         `json:"true_neg"`
+	FalseNeg         int64                         `json:"false_neg"`
+}
+
+type thresholdResult struct {
+	Threshold float64 `json:"threshold"`
+	Precision float64 `json:"precision"`
+	Recall    float64 `json:"recall"`
+	F2        float64 `json:"f2"`
 }
 
 type trainingSummary struct {
-	Train           metrics       `json:"train"`
-	Validation      metrics       `json:"validation"`
-	Test            metrics       `json:"test"`
-	Epochs          int           `json:"epochs"`
-	Elapsed         time.Duration `json:"elapsed"`
-	MaxRows         int           `json:"max_rows"`
-	LearnedAt       time.Time     `json:"learned_at"`
-	LearningRate    float64       `json:"learning_rate"`
-	L2              float64       `json:"l2"`
-	Threshold       float64       `json:"threshold"`
-	ThresholdMetric string        `json:"threshold_metric"`
-	ThresholdStep   float64       `json:"threshold_step"`
-	TrainInputPath  string        `json:"train_input_path"`
-	ValidationPath  string        `json:"validation_input_path"`
-	TestPath        string        `json:"test_input_path"`
+	ValidationThresholds []thresholdResult `json:"validation_thresholds"`
+	Train                metrics           `json:"train"`
+	Validation           metrics           `json:"validation"`
+	Test                 metrics           `json:"test"`
+	Epochs               int               `json:"epochs"`
+	Elapsed              time.Duration     `json:"elapsed"`
+	MaxRows              int               `json:"max_rows"`
+	LearnedAt            time.Time         `json:"learned_at"`
+	LearningRate         float64           `json:"learning_rate"`
+	L2                   float64           `json:"l2"`
+	Threshold            float64           `json:"threshold"`
+	ThresholdMetric      string            `json:"threshold_metric"`
+	TrainInputPath       string            `json:"train_input_path"`
+	ValidationPath       string            `json:"validation_input_path"`
+	TestPath             string            `json:"test_input_path"`
 }
 
 type fraudModel struct {
@@ -77,22 +87,18 @@ type fraudModel struct {
 }
 
 type fraudRawData struct {
-	NumericData     []float64
-	CategoricalData []float64
-	Labels          []int
-	Rows            int
+	NumericData []float64
+	Records     []record
+	Labels      []int
+	Rows        int
 }
 
 type record struct {
-	Step           float64
-	Type           string
-	Amount         float64
-	OldBalanceOrig float64
-	NewBalanceOrig float64
-	NameDest       string
-	OldBalanceDest float64
-	NewBalanceDest float64
-	IsFraud        int
+	Step     float64
+	Type     string
+	Amount   float64
+	NameDest string
+	IsFraud  int
 }
 
 type predictionJob struct {
@@ -112,25 +118,24 @@ func main() {
 	validationInput := flag.String("validation-input", "credit-card-fraud-datasets/transactions_validation.csv", "Path to validation CSV")
 	testInput := flag.String("test-input", "credit-card-fraud-datasets/transactions_test.csv", "Path to test CSV")
 	inputPath := flag.String("input", "credit-card-fraud-datasets/transactions_train.csv", "Path to prediction input CSV")
-	modelPath := flag.String("model", "credit-card-fraud-datasets/transactions_model.json", "Path to save or load the fraud model")
+	modelPath := flag.String("model", "new_transaction_features_2_layer_recommend_settings.json", "Path to save or load the fraud model")
 	outputPath := flag.String("output", "credit-card-fraud-datasets/transactions_predictions.csv", "Path to write batch predictions")
-	epochs := flag.Int("epochs", 2, "Number of training epochs")
-	learningRate := flag.Float64("learning-rate", 0.01, "Learning rate for the neural network")
+	optimizer := flag.String("optimizer", "adam", "Optimizer: adam or sgd")
+	batchSize := flag.Int("batch-size", 256, "Training batch size (positive)")
+	epochs := flag.Int("epochs", 50, "Number of training epochs")
+	learningRate := flag.Float64("learning-rate", 0.001, "Learning rate for the neural network")
 	l2 := flag.Float64("l2", 0.00001, "Compatibility flag kept for the fraud CLI; not applied by irisnn training")
-	hiddenNeurons := flag.Int("hidden-neurons", defaultHiddenNeurons, "Number of hidden neurons in the fraud neural network")
+	hiddenNeurons2 := flag.Int("hidden-neurons-2", 32, "Number of neurons in the second ReLU hidden layer")
+	hiddenNeurons := flag.Int("hidden-neurons", 64, "Number of hidden neurons in the fraud neural network")
 	seed := flag.Int("seed", 42, "Random seed for fraud model initialization")
 	maxRows := flag.Int("max-rows", 0, "Optional maximum number of rows to read from each CSV; 0 uses all rows")
-	thresholdStep := flag.Float64("threshold-step", 0.01, "Threshold search step for validation tuning")
+	positiveWeight := flag.String("positive-weight", "auto", "Positive BCE weight: auto uses training legitimate/fraud ratio, or specify a positive number")
 	workers := flag.Int("workers", runtime.NumCPU(), "Number of worker goroutines for batch prediction")
 
 	step := flag.Float64("step", 0, "Transaction step")
 	txType := flag.String("type", "", "Transaction type")
 	amount := flag.Float64("amount", 0, "Transaction amount")
-	oldBalanceOrig := flag.Float64("oldbalance-orig", 0, "Origin account balance before")
-	newBalanceOrig := flag.Float64("newbalance-orig", 0, "Origin account balance after")
 	nameDest := flag.String("name-dest", "", "Destination account id")
-	oldBalanceDest := flag.Float64("oldbalance-dest", 0, "Destination account balance before")
-	newBalanceDest := flag.Float64("newbalance-dest", 0, "Destination account balance after")
 	flag.Parse()
 
 	switch *mode {
@@ -144,9 +149,12 @@ func main() {
 			*learningRate,
 			*l2,
 			*hiddenNeurons,
+			*hiddenNeurons2,
 			*seed,
 			*maxRows,
-			*thresholdStep,
+			*positiveWeight,
+			*batchSize,
+			*optimizer,
 		)
 		if err != nil {
 			log.Fatal(err)
@@ -176,14 +184,10 @@ func main() {
 			log.Fatal(err)
 		}
 		one := record{
-			Step:           *step,
-			Type:           *txType,
-			Amount:         *amount,
-			OldBalanceOrig: *oldBalanceOrig,
-			NewBalanceOrig: *newBalanceOrig,
-			NameDest:       *nameDest,
-			OldBalanceDest: *oldBalanceDest,
-			NewBalanceDest: *newBalanceDest,
+			Step:     *step,
+			Type:     *txType,
+			Amount:   *amount,
+			NameDest: *nameDest,
 		}
 		probability, label, err := predictRecord(model, one)
 		if err != nil {
@@ -191,7 +195,7 @@ func main() {
 		}
 		fmt.Printf("Fraud probability: %.6f\n", probability)
 		fmt.Printf("Predicted label: %d\n", label)
-		fmt.Printf("Threshold used: %.2f\n", model.Threshold)
+		fmt.Printf("Threshold used: %.17g\n", model.Threshold)
 	default:
 		log.Fatalf("unsupported mode %q", *mode)
 	}
@@ -205,10 +209,23 @@ func trainFraudModel(
 	learningRate,
 	l2 float64,
 	hiddenNeurons,
+	hiddenNeurons2,
 	seed,
 	maxRows int,
-	thresholdStep float64,
+	positiveWeightOption string,
+	batchSize int,
+	optimizer string,
 ) (*fraudModel, error) {
+	if optimizer != "adam" && optimizer != "sgd" {
+		return nil, fmt.Errorf("optimizer must be adam or sgd")
+	}
+	fmt.Printf("Optimizer: %s\n", optimizer)
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("batch size must be positive")
+	}
+	if hiddenNeurons <= 0 || hiddenNeurons2 <= 0 {
+		return nil, fmt.Errorf("hidden layer widths must be positive")
+	}
 	start := time.Now()
 	typeIndex := buildTypeIndex()
 
@@ -216,6 +233,11 @@ func trainFraudModel(
 	if err != nil {
 		return nil, err
 	}
+	positiveWeight, err := resolvePositiveWeight(trainRaw.Labels, positiveWeightOption)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("Positive-class weight: %.6f\n", positiveWeight)
 	validationRaw, err := loadFraudRawData(validationPath, maxRows, typeIndex)
 	if err != nil {
 		return nil, err
@@ -241,46 +263,70 @@ func trainFraudModel(
 	}
 
 	config := irisnn.NeuralNetConfig{
-		Loss:          "bce",
-		InputNeurons:  fraudInputFeatures,
-		OutputNeurons: fraudOutputClasses,
-		HiddenNeurons: hiddenNeurons,
-		NumEpochs:     epochs,
-		LearningRate:  learningRate,
-		Seed:          seed,
+		Loss:           "bce",
+		BatchSize:      batchSize,
+		Optimizer:      optimizer,
+		PositiveWeight: positiveWeight,
+		InputNeurons:   fraudInputFeatures,
+		OutputNeurons:  fraudOutputClasses,
+		HiddenNeurons:  hiddenNeurons,
+		HiddenNeurons2: hiddenNeurons2,
+		NumEpochs:      epochs,
+		LearningRate:   learningRate,
+		Seed:           seed,
 	}
 	network := irisnn.NewNeuralNetwork(config, scaler)
-	if err := network.Train(trainSet.Inputs, trainSet.Labels); err != nil {
+	if err := network.TrainWithEpochCallback(trainSet.Inputs, trainSet.Labels, func(epoch int) error {
+		train, err := evaluateModel(network, trainSet, defaultCutoff)
+		if err != nil {
+			return err
+		}
+		val, err := evaluateModel(network, validationSet, defaultCutoff)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Epoch %d/%d - train bce %.6f weighted_bce %.6f ap %.6f | val bce %.6f weighted_bce %.6f ap %.6f\n", epoch, epochs, train.Loss, train.WeightedBCE, train.AveragePrecision, val.Loss, val.WeightedBCE, val.AveragePrecision)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
-	threshold, valMetrics, err := tuneThreshold(network, validationSet, thresholdStep)
+	threshold, valMetrics, thresholdRows, err := tuneThreshold(network, validationSet)
 	if err != nil {
 		return nil, err
 	}
 
-	trainMetrics, err := evaluateModel(network, trainSet, threshold)
+	fmt.Println("Validation thresholds:")
+	fmt.Println("Threshold    Precision    Recall    F2")
+	for _, row := range thresholdRows {
+		fmt.Printf("%.2f         %.6f     %.6f  %.6f\n", row.Threshold, row.Precision, row.Recall, row.F2)
+	}
+
+	trainMetrics, err := evaluateModelWithStats(network, trainSet, threshold, true)
 	if err != nil {
 		return nil, err
 	}
-	testMetrics, err := evaluateModel(network, testSet, threshold)
+	testMetrics, err := evaluateModelWithStats(network, testSet, threshold, true)
 	if err != nil {
 		return nil, err
 	}
 
 	fmt.Printf(
-		"Training complete - train bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | val bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | test bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | threshold %.2f\n",
+		"Training complete - train bce %.6f weighted_bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | val bce %.6f weighted_bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | test bce %.6f weighted_bce %.6f acc %.4f precision %.4f recall %.4f f2 %.4f ap %.6f | threshold %.17g\n",
 		trainMetrics.Loss,
+		trainMetrics.WeightedBCE,
 		trainMetrics.Accuracy,
 		trainMetrics.Precision,
 		trainMetrics.Recall,
 		trainMetrics.F2, trainMetrics.AveragePrecision,
 		valMetrics.Loss,
+		valMetrics.WeightedBCE,
 		valMetrics.Accuracy,
 		valMetrics.Precision,
 		valMetrics.Recall,
 		valMetrics.F2, valMetrics.AveragePrecision,
 		testMetrics.Loss,
+		testMetrics.WeightedBCE,
 		testMetrics.Accuracy,
 		testMetrics.Precision,
 		testMetrics.Recall,
@@ -288,22 +334,39 @@ func trainFraudModel(
 		threshold,
 	)
 
+	for _, split := range []struct {
+		name  string
+		stats *irisnn.ClassProbabilityStats
+	}{{"Train", trainMetrics.ProbabilityStats}, {"Validation", valMetrics.ProbabilityStats}, {"Test", testMetrics.ProbabilityStats}} {
+		fmt.Printf("%s predicted fraud probabilities by true class:\n", split.name)
+		for _, class := range []struct {
+			name  string
+			stats *irisnn.ProbabilityStats
+		}{{"Legitimate", split.stats.Legitimate}, {"Fraud", split.stats.Fraud}} {
+			if class.stats == nil {
+				fmt.Printf("  %s: count=0, statistics N/A\n", class.name)
+				continue
+			}
+			st := class.stats
+			fmt.Printf("  %s: count=%d mean=%.6f median=%.6f p90=%.6f p99=%.6f\n", class.name, st.Count, st.Mean, st.Median, st.P90, st.P99)
+		}
+	}
 	summary := trainingSummary{
-		Train:           trainMetrics,
-		Validation:      valMetrics,
-		Test:            testMetrics,
-		Epochs:          epochs,
-		Elapsed:         time.Since(start),
-		MaxRows:         maxRows,
-		LearnedAt:       time.Now(),
-		LearningRate:    learningRate,
-		L2:              l2,
-		Threshold:       threshold,
-		ThresholdMetric: "F2",
-		ThresholdStep:   thresholdStep,
-		TrainInputPath:  trainPath,
-		ValidationPath:  validationPath,
-		TestPath:        testPath,
+		ValidationThresholds: thresholdRows,
+		Train:                trainMetrics,
+		Validation:           valMetrics,
+		Test:                 testMetrics,
+		Epochs:               epochs,
+		Elapsed:              time.Since(start),
+		MaxRows:              maxRows,
+		LearnedAt:            time.Now(),
+		LearningRate:         learningRate,
+		L2:                   l2,
+		Threshold:            threshold,
+		ThresholdMetric:      "F2",
+		TrainInputPath:       trainPath,
+		ValidationPath:       validationPath,
+		TestPath:             testPath,
 	}
 
 	model := &fraudModel{
@@ -324,9 +387,9 @@ func trainFraudModel(
 
 func loadFraudRawData(path string, maxRows int, typeIndex map[string]int) (*fraudRawData, error) {
 	raw := &fraudRawData{
-		NumericData:     make([]float64, 0, 1024*numericFeatureCount),
-		CategoricalData: make([]float64, 0, 1024*categoricalFeatureCount),
-		Labels:          make([]int, 0, 1024),
+		NumericData: make([]float64, 0, 1024*numericFeatureCount),
+		Records:     make([]record, 0, 1024),
+		Labels:      make([]int, 0, 1024),
 	}
 
 	err := streamRecords(path, maxRows, func(idx int, row []string) error {
@@ -336,7 +399,7 @@ func loadFraudRawData(path string, maxRows int, typeIndex map[string]int) (*frau
 		}
 
 		raw.NumericData = append(raw.NumericData, numericFeatures(rec)...)
-		raw.CategoricalData = append(raw.CategoricalData, categoricalFeatures(rec, typeIndex)...)
+		raw.Records = append(raw.Records, rec)
 		raw.Labels = append(raw.Labels, rec.IsFraud)
 		raw.Rows++
 		return nil
@@ -359,24 +422,13 @@ func buildFraudDataset(raw *fraudRawData, scaler *irisnn.FeatureScaler) (*irisnn
 		return nil, fmt.Errorf("feature scaler is nil")
 	}
 
-	numericMatrix := mat.NewDense(raw.Rows, numericFeatureCount, raw.NumericData)
-	scaledNumeric := scaler.Transform(numericMatrix)
-	scaledData := scaledNumeric.RawMatrix().Data
-
-	inputsData := make([]float64, raw.Rows*fraudInputFeatures)
-	for row := 0; row < raw.Rows; row++ {
-		inputOffset := row * fraudInputFeatures
-		numericOffset := row * numericFeatureCount
-		categoricalOffset := row * categoricalFeatureCount
-
-		copy(
-			inputsData[inputOffset:inputOffset+numericFeatureCount],
-			scaledData[numericOffset:numericOffset+numericFeatureCount],
-		)
-		copy(
-			inputsData[inputOffset+numericFeatureCount:inputOffset+fraudInputFeatures],
-			raw.CategoricalData[categoricalOffset:categoricalOffset+categoricalFeatureCount],
-		)
+	inputsData := make([]float64, 0, raw.Rows*fraudInputFeatures)
+	for _, rec := range raw.Records {
+		features, err := encodeFeatures(rec, scaler)
+		if err != nil {
+			return nil, err
+		}
+		inputsData = append(inputsData, features...)
 	}
 
 	labels := make([]float64, raw.Rows)
@@ -389,78 +441,54 @@ func buildFraudDataset(raw *fraudRawData, scaler *irisnn.FeatureScaler) (*irisnn
 	return irisnn.NewDataset(mat.NewDense(raw.Rows, fraudInputFeatures, inputsData), mat.NewDense(raw.Rows, 1, labels))
 }
 
-func tuneThreshold(network *irisnn.NeuralNetwork, validationSet *irisnn.Dataset, step float64) (float64, metrics, error) {
-	if step <= 0 || step >= 1 {
-		step = 0.01
-	}
-
-	predictions, err := network.Predict(validationSet.Inputs)
+func tuneThreshold(network *irisnn.NeuralNetwork, validationSet *irisnn.Dataset) (float64, metrics, []thresholdResult, error) {
+	predictions, err := predictInChunks(network, validationSet.Inputs)
 	if err != nil {
-		return 0, metrics{}, err
+		return 0, metrics{}, nil, err
 	}
 
 	probabilities, err := irisnn.BinaryPositiveClassProbabilities(predictions)
 	if err != nil {
-		return 0, metrics{}, err
+		return 0, metrics{}, nil, err
 	}
 	actuals, err := irisnn.BinaryActualLabels(validationSet.Labels)
 	if err != nil {
-		return 0, metrics{}, err
+		return 0, metrics{}, nil, err
 	}
 	if len(probabilities) == 0 {
-		return defaultCutoff, metrics{}, fmt.Errorf("validation set has no rows for threshold tuning")
+		return defaultCutoff, metrics{}, nil, fmt.Errorf("validation set has no rows for threshold tuning")
 	}
 
-	bestThreshold := defaultCutoff
-	bestMetrics := metrics{F2: -1}
-
-	for threshold := step; threshold < 1.0; threshold += step {
-		binaryMetrics, err := irisnn.EvaluateBinaryThreshold(probabilities, actuals, threshold)
-		if err != nil {
-			return 0, metrics{}, err
-		}
-		current := toMetrics(binaryMetrics)
-		if betterThresholdCandidate(current, threshold, bestMetrics, bestThreshold) {
-			bestThreshold = threshold
-			bestMetrics = current
-		}
+	rows, err := validationThresholdReport(probabilities, actuals)
+	if err != nil {
+		return 0, metrics{}, nil, err
 	}
-
-	if bestMetrics.F2 < 0 {
-		binaryMetrics, err := irisnn.EvaluateBinaryThreshold(probabilities, actuals, defaultCutoff)
-		if err != nil {
-			return 0, metrics{}, err
-		}
-		bestMetrics = toMetrics(binaryMetrics)
-		bestThreshold = defaultCutoff
+	binaryMetrics, err := irisnn.BestF2Threshold(probabilities, actuals)
+	if err != nil {
+		return 0, metrics{}, nil, fmt.Errorf("validation threshold tuning: %w", err)
 	}
+	bestThreshold := binaryMetrics.Threshold
+	bestMetrics := toMetrics(binaryMetrics)
 
 	bestMetrics.AveragePrecision, err = irisnn.AveragePrecision(probabilities, actuals)
-	return bestThreshold, bestMetrics, err
-}
-
-func betterThresholdCandidate(current metrics, currentThreshold float64, best metrics, bestThreshold float64) bool {
-	if current.F2 > best.F2+1e-12 {
-		return true
+	if err != nil {
+		return 0, metrics{}, nil, err
 	}
-	if math.Abs(current.F2-best.F2) <= 1e-12 {
-		if current.Recall > best.Recall+1e-12 {
-			return true
-		}
-		if math.Abs(current.Recall-best.Recall) <= 1e-12 {
-			if current.Precision > best.Precision+1e-12 {
-				return true
-			}
-			if math.Abs(current.Precision-best.Precision) <= 1e-12 && currentThreshold < bestThreshold {
-				return true
-			}
-		}
+	stats, err := irisnn.SummarizeClassProbabilities(probabilities, actuals)
+	if err != nil {
+		return 0, metrics{}, nil, err
 	}
-	return false
+	bestMetrics.ProbabilityStats = &stats
+	bestMetrics.WeightedBCE, err = irisnn.WeightedBinaryCrossEntropy(predictions, validationSet.Labels, network.PositiveWeight())
+	return bestThreshold, bestMetrics, rows, err
 }
 
 func evaluateModel(network *irisnn.NeuralNetwork, dataset *irisnn.Dataset, threshold float64) (metrics, error) {
-	predictions, err := network.Predict(dataset.Inputs)
+	return evaluateModelWithStats(network, dataset, threshold, false)
+}
+
+func evaluateModelWithStats(network *irisnn.NeuralNetwork, dataset *irisnn.Dataset, threshold float64, includeStats bool) (metrics, error) {
+	predictions, err := predictInChunks(network, dataset.Inputs)
 	if err != nil {
 		return metrics{}, err
 	}
@@ -478,6 +506,17 @@ func evaluateModel(network *irisnn.NeuralNetwork, dataset *irisnn.Dataset, thres
 	actuals, err := irisnn.BinaryActualLabels(dataset.Labels)
 	if err != nil {
 		return metrics{}, err
+	}
+	result.WeightedBCE, err = irisnn.WeightedBinaryCrossEntropy(predictions, dataset.Labels, network.PositiveWeight())
+	if err != nil {
+		return metrics{}, err
+	}
+	if includeStats {
+		stats, err := irisnn.SummarizeClassProbabilities(probabilities, actuals)
+		if err != nil {
+			return metrics{}, err
+		}
+		result.ProbabilityStats = &stats
 	}
 	result.AveragePrecision, err = irisnn.AveragePrecision(probabilities, actuals)
 	return result, err
@@ -640,11 +679,10 @@ func buildPredictionInput(model *fraudModel, rec record) (*mat.Dense, error) {
 		return nil, fmt.Errorf("fraud model scaler is not initialized")
 	}
 
-	numeric := numericFeatures(rec)
-	scaledNumeric := model.Scaler.Transform(mat.NewDense(1, numericFeatureCount, numeric))
-	inputsData := append([]float64{}, scaledNumeric.RawMatrix().Data...)
-	inputsData = append(inputsData, categoricalFeatures(rec, model.TypeIndex)...)
-
+	inputsData, err := encodeFeatures(rec, model.Scaler)
+	if err != nil {
+		return nil, err
+	}
 	return mat.NewDense(1, fraudInputFeatures, inputsData), nil
 }
 
@@ -661,53 +699,57 @@ func parseRecord(row []string) (record, error) {
 	if err != nil {
 		return record{}, fmt.Errorf("parse amount: %w", err)
 	}
-	oldBalanceOrig, err := strconv.ParseFloat(row[4], 64)
-	if err != nil {
-		return record{}, fmt.Errorf("parse oldbalanceOrig: %w", err)
-	}
-	newBalanceOrig, err := strconv.ParseFloat(row[5], 64)
-	if err != nil {
-		return record{}, fmt.Errorf("parse newbalanceOrig: %w", err)
-	}
-	oldBalanceDest, err := strconv.ParseFloat(row[7], 64)
-	if err != nil {
-		return record{}, fmt.Errorf("parse oldbalanceDest: %w", err)
-	}
-	newBalanceDest, err := strconv.ParseFloat(row[8], 64)
-	if err != nil {
-		return record{}, fmt.Errorf("parse newbalanceDest: %w", err)
-	}
 	isFraud, err := strconv.Atoi(row[9])
 	if err != nil {
 		return record{}, fmt.Errorf("parse isFraud: %w", err)
 	}
 
-	return record{
-		Step:           step,
-		Type:           row[1],
-		Amount:         amount,
-		OldBalanceOrig: oldBalanceOrig,
-		NewBalanceOrig: newBalanceOrig,
-		NameDest:       row[6],
-		OldBalanceDest: oldBalanceDest,
-		NewBalanceDest: newBalanceDest,
-		IsFraud:        isFraud,
-	}, nil
+	rec := record{
+		Step:     step,
+		Type:     row[1],
+		Amount:   amount,
+		NameDest: row[6],
+		IsFraud:  isFraud,
+	}
+	return rec, validateRecord(rec)
 }
 
-func numericFeatures(rec record) []float64 {
-	origDelta := rec.OldBalanceOrig - rec.NewBalanceOrig
-	destDelta := rec.NewBalanceDest - rec.OldBalanceDest
-	return []float64{
-		rec.Step,
-		rec.Amount,
-		rec.OldBalanceOrig,
-		rec.NewBalanceOrig,
-		rec.OldBalanceDest,
-		rec.NewBalanceDest,
-		origDelta,
-		destDelta,
+func numericFeatures(rec record) []float64 { return []float64{math.Log1p(rec.Amount)} }
+
+func validateRecord(rec record) error {
+	if math.IsNaN(rec.Amount) || math.IsInf(rec.Amount, 0) || rec.Amount < 0 {
+		return fmt.Errorf("amount must be finite and nonnegative")
 	}
+	if math.IsNaN(rec.Step) || math.IsInf(rec.Step, 0) || rec.Step < 0 || math.Trunc(rec.Step) != rec.Step {
+		return fmt.Errorf("step must be a finite nonnegative integer")
+	}
+	if _, ok := buildTypeIndex()[strings.ToUpper(rec.Type)]; !ok {
+		return fmt.Errorf("unsupported transaction type %q", rec.Type)
+	}
+	return nil
+}
+
+func validAmountScaler(s *irisnn.FeatureScaler) bool {
+	return s != nil && len(s.Mean) == 1 && len(s.Std) == 1 && !math.IsNaN(s.Mean[0]) && !math.IsInf(s.Mean[0], 0) && !math.IsNaN(s.Std[0]) && !math.IsInf(s.Std[0], 0) && s.Std[0] > 0
+}
+
+func encodeFeatures(rec record, scaler *irisnn.FeatureScaler) ([]float64, error) {
+	if err := validateRecord(rec); err != nil {
+		return nil, err
+	}
+	if !validAmountScaler(scaler) {
+		return nil, fmt.Errorf("invalid log-amount scaler; retrain the model")
+	}
+	z := (math.Log1p(rec.Amount) - scaler.Mean[0]) / scaler.Std[0]
+	angle := 2 * math.Pi * math.Mod(rec.Step, 24) / 24
+	features := []float64{z, 0, 0, math.Sin(angle), math.Cos(angle)}
+	switch strings.ToUpper(rec.Type) {
+	case "TRANSFER":
+		features[1] = z
+	case "CASH_OUT":
+		features[2] = z
+	}
+	return append(features, categoricalFeatures(rec, buildTypeIndex())...), nil
 }
 
 func categoricalFeatures(rec record, typeIndex map[string]int) []float64 {
@@ -725,14 +767,7 @@ func categoricalFeatures(rec record, typeIndex map[string]int) []float64 {
 
 func featureNames() []string {
 	return []string{
-		"step_z",
-		"amount_z",
-		"oldbalanceOrig_z",
-		"newbalanceOrig_z",
-		"oldbalanceDest_z",
-		"newbalanceDest_z",
-		"origDelta_z",
-		"destDelta_z",
+		"log_amount_z", "transfer_amount", "cashout_amount", "hour_sin", "hour_cos",
 		"type_PAYMENT",
 		"type_TRANSFER",
 		"type_CASH_OUT",
@@ -818,6 +853,9 @@ func loadFraudModel(path string) (*fraudModel, error) {
 		return nil, err
 	}
 
+	if !reflect.DeepEqual(model.FeatureNames, featureNames()) || model.Model.InputWidth() != fraudInputFeatures || !validAmountScaler(model.Model.ScalerStats) {
+		return nil, fmt.Errorf("incompatible feature schema; retrain with the balance-free feature pipeline")
+	}
 	network, scaler, err := irisnn.LoadModelArtifact(&model.Model)
 	if err != nil {
 		return nil, err
@@ -857,4 +895,56 @@ func toEvaluationMetrics(train, validation, test metrics, duration time.Duration
 		Duration:  duration,
 		Timestamp: time.Now(),
 	}
+}
+
+func resolvePositiveWeight(labels []int, option string) (float64, error) {
+	if option != "auto" {
+		weight, err := strconv.ParseFloat(option, 64)
+		if err != nil || weight <= 0 || math.IsNaN(weight) || math.IsInf(weight, 0) {
+			return 0, fmt.Errorf("positive weight must be auto or a finite number greater than zero")
+		}
+		return weight, nil
+	}
+	frauds := 0
+	for _, label := range labels {
+		if label == 1 {
+			frauds++
+		} else if label != 0 {
+			return 0, fmt.Errorf("invalid training label %d", label)
+		}
+	}
+	legitimate := len(labels) - frauds
+	if frauds == 0 || legitimate == 0 {
+		return 0, fmt.Errorf("automatic positive weight requires both classes in the loaded training rows")
+	}
+	return float64(legitimate) / float64(frauds), nil
+}
+
+func validationThresholdReport(probabilities []float64, actuals []int) ([]thresholdResult, error) {
+	var rows []thresholdResult
+	for _, threshold := range []float64{0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.75, 0.80} {
+		m, err := irisnn.EvaluateBinaryThreshold(probabilities, actuals, threshold)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, thresholdResult{threshold, m.Precision, m.Recall, m.F2})
+	}
+	return rows, nil
+}
+
+// Bound hidden activation memory while retaining probabilities for exact AP.
+func predictInChunks(network *irisnn.NeuralNetwork, inputs *mat.Dense) (*mat.Dense, error) {
+	rows, cols := inputs.Dims()
+	result := mat.NewDense(rows, 1, nil)
+	for start := 0; start < rows; start += 512 {
+		end := min(start+512, rows)
+		prediction, err := network.Predict(inputs.Slice(start, end, 0, cols).(*mat.Dense))
+		if err != nil {
+			return nil, err
+		}
+		for row := start; row < end; row++ {
+			result.Set(row, 0, prediction.At(row-start, 0))
+		}
+	}
+	return result, nil
 }
