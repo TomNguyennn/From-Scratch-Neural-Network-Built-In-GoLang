@@ -390,3 +390,8 @@ SGD for older models and library callers. Adam state persists across training ca
 on the same network, but moments and timestep are not serialized: loading preserves
 predictions and starts fresh optimizer state for further training. Compare validation
 AP and BCE before increasing epochs; Adam is not guaranteed to improve results.
+
+## PyTorch experiments
+
+See [experiment/README.md](experiment/README.md) for the PyTorch fraud replica,
+configurable stratified samples, notebook intervention points, metrics and checkpoints.
